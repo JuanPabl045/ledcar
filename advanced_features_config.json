@@ -1,0 +1,108 @@
+{
+  "advanced_features": {
+    "beat_detection": {
+      "description": "Real-time BPM extraction + beat tracking",
+      "class": "BeatDetector",
+      "latency_ms": 20,
+      "model_size_kb": 1,
+      "inputs": [
+        "onset_strength (0-1)"
+      ],
+      "outputs": [
+        "bpm (60-200)",
+        "confidence (0-1)",
+        "beat_interval_ms"
+      ],
+      "calibration": {
+        "buffer_size_frames": 75,
+        "buffer_duration_seconds": 5,
+        "bpm_range": [
+          60,
+          200
+        ]
+      }
+    },
+    "onset_detection": {
+      "description": "Spectral flux peak detection for note onsets",
+      "class": "OnsetDetector",
+      "latency_ms": 3,
+      "model_size_kb": 1,
+      "inputs": [
+        "mel_spectrum (64,128)"
+      ],
+      "outputs": [
+        "onset_strength (0-1)",
+        "is_onset (bool)"
+      ],
+      "calibration": {
+        "threshold": 0.3,
+        "spectral_flux_method": "L2 norm of derivative",
+        "buffer_onsets": 100
+      }
+    },
+    "emotion_recognition": {
+      "description": "CNN multi-class: Happy/Sad/Energetic/Calm",
+      "model_file": "modelo_emotion_optimized.tflite",
+      "latency_ms": 8,
+      "model_size_kb": 45,
+      "input_shape": [
+        1,
+        64,
+        128,
+        1
+      ],
+      "output_shape": [
+        1,
+        4
+      ],
+      "classes": [
+        {
+          "id": 0,
+          "name": "Happy",
+          "led_color": [
+            255,
+            255,
+            0
+          ]
+        },
+        {
+          "id": 1,
+          "name": "Sad",
+          "led_color": [
+            0,
+            0,
+            255
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Energetic",
+          "led_color": [
+            255,
+            0,
+            0
+          ]
+        },
+        {
+          "id": 3,
+          "name": "Calm",
+          "led_color": [
+            0,
+            255,
+            0
+          ]
+        }
+      ],
+      "quantization": {
+        "type": "int8",
+        "scale": 0.003906,
+        "zero_point": -128
+      }
+    }
+  },
+  "led_mapping": {
+    "beat_detection": "LED pulsing speed = BPM",
+    "onset_detection": "LED flash intensity = onset_strength",
+    "emotion_recognition": "LED base color = emotion class"
+  }
+}

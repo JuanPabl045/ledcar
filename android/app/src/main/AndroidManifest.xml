@@ -4,6 +4,9 @@
     android:usesPermissionFlags="neverForLocation" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+<uses-permission android:name="android.permission.WAKE_LOCK" />
     <application
         android:label="ledcar"
         android:name="${applicationName}"
@@ -44,6 +47,10 @@
         <!-- Servicio requerido por flutter_web_auth_2 para mantener el proceso vivo durante OAuth -->
         <service
             android:name="com.linusu.flutter_web_auth_2.KeepAliveService"
+            android:exported="false" />
+        <service
+            android:name=".MediaProjectionService"
+            android:foregroundServiceType="mediaProjection"
             android:exported="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
