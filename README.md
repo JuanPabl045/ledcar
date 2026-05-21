@@ -24,6 +24,11 @@ LEDCar is an advanced, AI-powered smart lighting system designed for car interio
 2.  **Audio Processing (TFLite / DSP):** Python-trained ML models and DSP algorithms run efficiently on the edge to analyze spectral flux and audio energy.
 3.  **Hardware Driver (ESP32):** Receives the processed lighting commands (color, flash intensity, pulse rate) and physically controls the LEDs.
 
+### System Architecture Flow
+
+[![System Architecture Flow](https://github.com/user-attachments/assets/2b81f78f-5a3c-4ee3-b0b5-4641fecb855f)](https://github.com/user-attachments/assets/2b81f78f-5a3c-4ee3-b0b5-4641fecb855f)
+<sub>Haz clic en la imagen para verla completa, hacer zoom y desplazarla con el visor de imágenes del navegador.</sub>
+
 ## 🚀 Getting Started
 
 *(Note: Add specific instructions here as the project evolves)*
@@ -38,27 +43,3 @@ LEDCar is an advanced, AI-powered smart lighting system designed for car interio
 1. Clone the repository:
    ```bash
    git clone https://github.com/JuanPabl045/ledcar.git
-   ```
-2. Install Flutter dependencies:
-   ```bash
-   cd ledcar
-   flutter pub get
-   ```
-3. Run the mobile app:
-   ```bash
-   flutter run
-   ```
-
-## 🧠 Machine Learning & DSP Details
-
-The `/advanced_features_top3.py` script is the core of the audio analysis engine:
-*   **Latency:** Kept strictly low (~3ms for onset, ~20ms for beats).
-*   **Quantization:** The emotion recognition CNN is quantized to `int8`, reducing the model size for edge deployment without sacrificing accuracy.
-
-## 🤝 Contributing
-
-This is an active project. Feel free to open issues or submit pull requests if you have ideas for new lighting patterns, better ML models, or performance optimizations!
-
-## 📄 License
-
-[MIT License](LICENSE) (or specify your license here)
