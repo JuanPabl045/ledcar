@@ -345,22 +345,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           double potencia = math.max(si, tension).clamp(0.0, 1.0);
           
           // El usuario solicitó EXPRESAMENTE: Rojo, Ámbar y Amarillo.
-          // Eliminamos el Verde por completo.
-          // Potencia Baja -> Amarillo (R=255, G=255)
+          // Potencia Baja -> Rojo (R=255, G=0)
           // Potencia Media -> Ámbar (R=255, G=120)
-          // Potencia Alta -> Rojo (R=255, G=0)
+          // Potencia Alta -> Amarillo (R=255, G=255)
           
           _targetR = 255.0;
           _targetB = 0.0;
           
           if (potencia < 0.5) {
-             // Amarillo a Ámbar
+             // Rojo a Ámbar
              double t = potencia / 0.5;
-             _targetG = 255.0 - (t * 135.0); // 255 -> 120
+             _targetG = t * 120.0; // 0 -> 120
           } else {
-             // Ámbar a Rojo
+             // Ámbar a Amarillo
              double t = (potencia - 0.5) / 0.5;
-             _targetG = 120.0 - (t * 120.0); // 120 -> 0
+             _targetG = 120.0 + (t * 135.0); // 120 -> 255
           }
           
           _targetR = _targetR.clamp(0.0, 255.0);
