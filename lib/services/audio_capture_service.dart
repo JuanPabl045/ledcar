@@ -9,6 +9,9 @@ class AudioAnalysisResult {
   final double energy;
   final double bassEnergy;
   final double kickEnergy;
+  final double vocalEnergy;       // Capa 1
+  final double spectralCentroid;   // Capa 3
+  final double tension;            // Capa 3
   final bool kickHit; // transient detected in kick band
   final bool snareHit; // transient detected in snare band
   final String section; // "calm" or "energetic"
@@ -33,6 +36,9 @@ class AudioAnalysisResult {
     required this.energy,
     required this.bassEnergy,
     required this.kickEnergy,
+    required this.vocalEnergy,
+    required this.spectralCentroid,
+    required this.tension,
     required this.kickHit,
     required this.snareHit,
     required this.section,
@@ -58,6 +64,9 @@ class AudioAnalysisResult {
     energy: (map['energy'] as num?)?.toDouble() ?? 0.0,
     bassEnergy: (map['bassEnergy'] as num?)?.toDouble() ?? 0.0,
     kickEnergy: (map['kickEnergy'] as num?)?.toDouble() ?? 0.0,
+    vocalEnergy: (map['vocalEnergy'] as num?)?.toDouble() ?? 0.0,
+    spectralCentroid: (map['spectralCentroid'] as num?)?.toDouble() ?? 0.0,
+    tension: (map['tension'] as num?)?.toDouble() ?? 0.0,
     kickHit: map['kickHit'] as bool? ?? false,
     snareHit: map['snareHit'] as bool? ?? false,
     section: map['section'] as String? ?? 'calm',

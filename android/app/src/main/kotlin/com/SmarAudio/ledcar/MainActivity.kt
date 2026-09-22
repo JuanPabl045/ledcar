@@ -25,7 +25,7 @@ class MainActivity : FlutterActivity() {
     private val SAMPLE_RATE     = 16000
     private val YAMNET_SAMPLES  = 15600          // YAMNet needs exactly this at 16kHz
     private val SECTION_AUDIO   = 70656          // ~4.4s at 16kHz → resample to 22050 → 96 mel frames
-    private val FAST_CHUNK      = 533            // ~33ms chunks for ~30 fast energy updates/sec
+    private val FAST_CHUNK      = 400            // ~25ms chunks for ~40 fast energy updates/sec
     private val FFT_SIZE         = 1024           // next power-of-2 for radix-2 FFT
     private val SECTION_SR      = 22050          // Section model trained at 22050Hz
 
@@ -43,6 +43,25 @@ class MainActivity : FlutterActivity() {
     private val pendingResults = ArrayDeque<Map<String, Any>>()
     private val MAX_PENDING = 5
     private var previousSpectrum: Array<FloatArray>? = null
+
+    private val mlExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    @Volatile private var lastSection = "non_chorus"
+    @Volatile private var lastSectionConf = 0.0
+    @Volatile private var lastCategory = ""
+    @Volatile private var lastConfidence = 0.0
+    @Volatile private var lastTopClass = ""
+    @Volatile private var lastInstrument = "mixed"
+    @Volatile private var lastBeatBpm = 0
+    @Volatile private var lastBeatConfidence = 0.0
+    @Volatile private var lastBeatIntervalMs = 0.0
+    @Volatile private var lastOnsetStrength = 0.0
+    @Volatile private var lastIsOnset = false
+    @Volatile private var lastEmotionLabel = ""
+    @Volatile private var lastEmotionConfidence = 0.0
+    @Volatile private var lastEmotionR = 0
+    @Volatile private var lastEmotionG = 0
+    @Volatile private var lastEmotionB = 0
 
     // ── Mel-spectrogram parameters (must match training config!) ──
     private val N_FFT       = 2048
@@ -193,13 +212,13 @@ class MainActivity : FlutterActivity() {
         // Emotion model + advanced pipeline
         if (emotionInterpreter == null) {
             try {
-                val afd = assets.openFd("modelo_emotion_optimized.tflite")
+                val afd = assets.openFd("ledcar_density_model.tflite")
                 val stream = FileInputStream(afd.fileDescriptor)
                 val buffer: MappedByteBuffer = stream.channel.map(
                     FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
                 emotionInterpreter = Interpreter(buffer)
                 advancedPipeline = AdvancedAudioPipeline(emotionInterpreter!!)
-                android.util.Log.d("Emotion", "Modelo de emocion cargado correctamente")
+                android.util.Log.d("Emotion", "Modelo de densidad cargado correctamente")
                 android.util.Log.d("Pipeline", "Advanced pipeline inicializado")
             } catch (e: Exception) {
                 android.util.Log.e("Emotion", "Error cargando modelo: ${e.message}")
@@ -476,30 +495,18 @@ class MainActivity : FlutterActivity() {
         captureThread = Thread {
             isCapturing = true
             android.util.Log.d("AudioCapture", "Hilo de captura iniciado, isCapturing=$isCapturing")
-          try {
-            // Ring buffer accumulates small chunks into full model buffer
+try {
             val ringBuffer = FloatArray(SECTION_AUDIO)
-            var ringPos = 0
+            var ringWritePos = 0
+            var totalSamplesAccumulated = 0
+            var slowAccumulator = 0
             val fastChunk = FloatArray(FAST_CHUNK)
-            var yamnetSampleCount = 0  // separate counter for YAMNet (~3s cadence)
 
-            // Cached model results (persist between fast updates)
-            var lastSection = "non_chorus"
-            var lastSectionConf = 0.0
-            var lastCategory = ""
-            var lastConfidence = 0.0
-            var lastTopClass = ""
-            var lastInstrument = "mixed"
-            var lastBeatBpm = 0
-            var lastBeatConfidence = 0.0
-            var lastBeatIntervalMs = 0.0
-            var lastOnsetStrength = 0.0
-            var lastIsOnset = false
-            var lastEmotionLabel = ""
-            var lastEmotionConfidence = 0.0
-            var lastEmotionR = 0
-            var lastEmotionG = 0
-            var lastEmotionB = 0
+            // Spectral Centroid & Tension tracking variables (Capa 3)
+            var avgCentroid = 0.0
+            var tension = 0.0
+
+
 
             // EMA smoothing for energy/bass (avoids jumpy values)
             var smoothEnergy = 0.0
@@ -576,6 +583,26 @@ class MainActivity : FlutterActivity() {
                 val kickHit  = avgKick > 0.001 && kickE / avgKick > KICK_THRESHOLD
                 val snareHit = avgSnare > 0.001 && snareE / avgSnare > SNARE_THRESHOLD
 
+                // Capa 1: Voces (1000Hz - 4000Hz)
+                val vocalE = bandEnergy(64, 256)
+
+                // Capa 3: Centroide Espectral
+                var numCentroid = 0.0
+                var denCentroid = 0.0
+                for (k in 0 until (FFT_SIZE / 2)) {
+                    val mag = sqrt((fftR[k] * fftR[k] + fftI[k] * fftI[k]).toDouble())
+                    val freq = k * 15.625
+                    numCentroid += freq * mag
+                    denCentroid += mag
+                }
+                val spectralCentroid = if (denCentroid > 1e-5) numCentroid / denCentroid else 0.0
+
+                // Capa 3: Tensión
+                avgCentroid = avgCentroid * 0.98 + spectralCentroid * 0.02
+                val centroidRatio = if (avgCentroid > 0.0) spectralCentroid / avgCentroid else 1.0
+                val instantTension = (centroidRatio - 1.0).coerceIn(0.0, 1.0)
+                tension = tension * 0.95 + instantTension * 0.05
+
                 // EMA smooth
                 smoothEnergy = smoothEnergy + EMA_FAST * (energy - smoothEnergy)
                 smoothBass = smoothBass + EMA_FAST * (bassEnergy.toDouble() - smoothBass)
@@ -587,6 +614,9 @@ class MainActivity : FlutterActivity() {
                     "kickHit" to kickHit,
                     "snareHit" to snareHit,
                     "kickEnergy" to kickE.coerceIn(0.0, 1.0),
+                    "vocalEnergy" to vocalE.coerceIn(0.0, 1.0),
+                    "spectralCentroid" to spectralCentroid,
+                    "tension" to tension,
                     "section" to lastSection,
                     "sectionConfidence" to lastSectionConf,
                     "isFastUpdate" to true,
@@ -619,86 +649,97 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
-                // ── SLOW PATH: accumulate into ring buffer ──
-                val toCopy = minOf(read, SECTION_AUDIO - ringPos)
-                System.arraycopy(fastChunk, 0, ringBuffer, ringPos, toCopy)
-                ringPos += toCopy
-                yamnetSampleCount += read
+                // ── SLOW PATH: accumulate into circular ring buffer ──
+                for (i in 0 until read) {
+                    ringBuffer[ringWritePos] = fastChunk[i]
+                    ringWritePos = (ringWritePos + 1) % SECTION_AUDIO
+                }
+                totalSamplesAccumulated += read
+                slowAccumulator += read
 
-                // YAMNet every ~3s (48000 samples at 16kHz), independently of section model
                 // YAMNet desactivado
 
-                // Section model when ring buffer full (~4.4s of audio)
-                if (ringPos >= SECTION_AUDIO) {
-                    val modelAudio = ringBuffer.copyOf()
-                    ringPos = 0
+                // Run ML inference every 1.0 second (16000 samples) once the buffer is full
+                if (totalSamplesAccumulated >= SECTION_AUDIO && slowAccumulator >= 16000) {
+                    slowAccumulator = 0
                     frameCounter++
 
-                    val energy = sqrt(modelAudio.map { (it * it).toDouble() }.average()).coerceIn(0.0, 1.0)
-                    val audio22k = resample(modelAudio, SAMPLE_RATE, SECTION_SR)
-                    val mel = computeMelSpectrogram(audio22k)
-
-                    // Section detector: resample 16k→22k + mel + inference
-                    val sectionResult = runSectionInferenceFromMel(mel, energy)
-                    lastSection = sectionResult["section"] as String
-                    lastSectionConf = sectionResult["sectionConfidence"] as Double
-
-                    // Advanced pipeline: beat/onset/emotion
-                    val melNorm = normalizeMelToUnit(mel)
-                    val melResized = resizeMelSpec(melNorm, 64, 128)
-                    val onsetStrength = computeSpectralFlux(melResized)
-                    try {
-                        val pipeline = advancedPipeline
-                        if (pipeline != null) {
-                            val out = pipeline.processFrame(melResized, onsetStrength)
-                            lastBeatBpm = out.beat.bpm
-                            lastBeatConfidence = out.beat.confidence.toDouble()
-                            lastBeatIntervalMs = out.beat.beatIntervalMs.toDouble()
-                            lastOnsetStrength = out.onset.first.toDouble()
-                            lastIsOnset = out.onset.second
-                            lastEmotionLabel = out.emotion.label
-                            lastEmotionConfidence = out.emotion.confidence.toDouble()
-                            lastEmotionR = out.emotion.color.r
-                            lastEmotionG = out.emotion.color.g
-                            lastEmotionB = out.emotion.color.b
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("Pipeline", "Advanced pipeline error: ${e.message}")
+                    // Extract linear snapshot of the last 4.4s of audio
+                    val modelAudio = FloatArray(SECTION_AUDIO)
+                    for (i in 0 until SECTION_AUDIO) {
+                        modelAudio[i] = ringBuffer[(ringWritePos + i) % SECTION_AUDIO]
                     }
 
-                    // Send full model update
-                    val fullResult = mutableMapOf<String, Any>(
-                        "energy" to (sectionResult["energy"] as Double),
-                        "bassEnergy" to bassEnergy,
-                        "section" to lastSection,
-                        "sectionConfidence" to lastSectionConf,
-                        "isFastUpdate" to false,
-                        "beatBpm" to lastBeatBpm,
-                        "beatConfidence" to lastBeatConfidence,
-                        "beatIntervalMs" to lastBeatIntervalMs,
-                        "onsetStrength" to lastOnsetStrength,
-                        "isOnset" to lastIsOnset,
-                        "emotionLabel" to lastEmotionLabel,
-                        "emotionConfidence" to lastEmotionConfidence,
-                        "emotionR" to lastEmotionR,
-                        "emotionG" to lastEmotionG,
-                        "emotionB" to lastEmotionB,
-                    )
-                    if (lastCategory.isNotEmpty()) {
-                        fullResult["category"] = lastCategory
-                        fullResult["confidence"] = lastConfidence
-                        fullResult["topClass"] = lastTopClass
-                    }
-                    fullResult["instrument"] = lastInstrument
-                    runOnUiThread {
-                        val sink = eventSink
-                        if (sink != null) {
-                            while (pendingResults.isNotEmpty()) {
-                                sink.success(pendingResults.removeFirst())
+                    val currentBassEnergy = bassEnergy
+
+                    mlExecutor.execute {
+                        try {
+                            val energy = sqrt(modelAudio.map { (it * it).toDouble() }.average()).coerceIn(0.0, 1.0)
+                            val audio22k = resample(modelAudio, SAMPLE_RATE, SECTION_SR)
+                            val mel = computeMelSpectrogram(audio22k)
+
+                            // Section detector: resample 16k→22k + mel + inference
+                            val sectionResult = runSectionInferenceFromMel(mel, energy)
+                            lastSection = sectionResult["section"] as String
+                            lastSectionConf = sectionResult["sectionConfidence"] as Double
+
+                            // Advanced pipeline: beat/onset/density
+                            val melNorm = normalizeMelToUnit(mel)
+                            val melResized = resizeMelSpec(melNorm, 64, 128)
+                            val onsetStrength = computeSpectralFlux(melResized)
+                            
+                            val pipeline = advancedPipeline
+                            if (pipeline != null) {
+                                val out = pipeline.processFrame(melResized, onsetStrength)
+                                lastBeatBpm = out.beat.bpm
+                                lastBeatConfidence = out.beat.confidence.toDouble()
+                                lastBeatIntervalMs = out.beat.beatIntervalMs.toDouble()
+                                lastOnsetStrength = out.onset.first.toDouble()
+                                lastIsOnset = out.onset.second
+                                lastEmotionLabel = out.emotion.label
+                                lastEmotionConfidence = out.emotion.confidence.toDouble()
+                                lastEmotionR = out.emotion.color.r
+                                lastEmotionG = out.emotion.color.g
+                                lastEmotionB = out.emotion.color.b
                             }
-                            sink.success(fullResult)
-                        } else if (pendingResults.size < MAX_PENDING) {
-                            pendingResults.addLast(fullResult)
+
+                            // Send full model update
+                            val fullResult = mutableMapOf<String, Any>(
+                                "energy" to (sectionResult["energy"] as Double),
+                                "bassEnergy" to currentBassEnergy,
+                                "section" to lastSection,
+                                "sectionConfidence" to lastSectionConf,
+                                "isFastUpdate" to false,
+                                "beatBpm" to lastBeatBpm,
+                                "beatConfidence" to lastBeatConfidence,
+                                "beatIntervalMs" to lastBeatIntervalMs,
+                                "onsetStrength" to lastOnsetStrength,
+                                "isOnset" to lastIsOnset,
+                                "emotionLabel" to lastEmotionLabel,
+                                "emotionConfidence" to lastEmotionConfidence,
+                                "emotionR" to lastEmotionR,
+                                "emotionG" to lastEmotionG,
+                                "emotionB" to lastEmotionB,
+                            )
+                            if (lastCategory.isNotEmpty()) {
+                                fullResult["category"] = lastCategory
+                                fullResult["confidence"] = lastConfidence
+                                fullResult["topClass"] = lastTopClass
+                            }
+                            fullResult["instrument"] = lastInstrument
+                            runOnUiThread {
+                                val sink = eventSink
+                                if (sink != null) {
+                                    while (pendingResults.isNotEmpty()) {
+                                        sink.success(pendingResults.removeFirst())
+                                    }
+                                    sink.success(fullResult)
+                                } else if (pendingResults.size < MAX_PENDING) {
+                                    pendingResults.addLast(fullResult)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("MLBackground", "Inferencia de fondo error: ${e.message}")
                         }
                     }
                 }

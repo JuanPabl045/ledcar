@@ -197,33 +197,19 @@ data class OnsetEvent(
 
 class EmotionRecognizer(private val tfliteInterpreter: Interpreter) {
     /**
-     * Music Emotion Recognition using CNN
+     * Music Density Classifier using quantized CNN (TFLite)
      *
-     * 4 Classes:
-     *   0 = Happy (energetic, warm) → YELLOW
-     *   1 = Sad (melancholic) → BLUE
-     *   2 = Energetic (intense) → RED
-     *   3 = Calm (peaceful) → GREEN
-     *
-     * Latency: ~8ms
-     * Size: 36 KB model
-     *
-     * Usage:
-     *   val emotion = emotionRecognizer.predict(melSpectrogram)
-     *   when(emotion.classId) {
-     *       0 -> ledColor = YELLOW
-     *       1 -> ledColor = BLUE
-     *       2 -> ledColor = RED
-     *       3 -> ledColor = GREEN
-     *   }
+     * 3 Classes:
+     *   0 = acustico (Acoustic/Soft) -> GREEN
+     *   1 = groove (Trap/Reggae) -> VIOLET
+     *   2 = energetico (Rock/EDM) -> RED
      */
 
-    private val emotionLabels = listOf("Happy", "Sad", "Energetic", "Calm")
+    private val emotionLabels = listOf("acustico", "groove", "energetico")
     private val emotionColors = listOf(
-        EmotionColor(255, 255, 0),    // Happy → Yellow
-        EmotionColor(0, 0, 255),      // Sad → Blue
-        EmotionColor(255, 0, 0),      // Energetic → Red
-        EmotionColor(0, 255, 0)       // Calm → Green
+        EmotionColor(0, 255, 0),      // acustico -> Green
+        EmotionColor(130, 0, 255),    // groove -> Violet/Indigo
+        EmotionColor(255, 0, 0)       // energetico -> Red
     )
 
     fun predict(melSpectrogram: Array<FloatArray>): EmotionPrediction {
@@ -242,11 +228,12 @@ class EmotionRecognizer(private val tfliteInterpreter: Interpreter) {
         }
         inputBuffer.rewind()
 
-        val outputBuffer = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        // El nuevo modelo tiene exactamente 3 salidas (acustico, groove, energetico)
+        val outputBuffer = ByteBuffer.allocateDirect(3).order(ByteOrder.nativeOrder())
         tfliteInterpreter.run(inputBuffer, outputBuffer)
 
         outputBuffer.rewind()
-        val raw = ByteArray(4)
+        val raw = ByteArray(3)
         outputBuffer.get(raw)
 
         val outScale = 0.00390625f

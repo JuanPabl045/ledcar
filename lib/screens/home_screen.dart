@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../services/ble_manager.dart';
 import '../services/audio_capture_service.dart';
+import '../widgets/debug_visualizer.dart';
 
 class LedCommand {
   final int tipo, r, g, b, brillo, patron, offsetMs;
@@ -41,6 +43,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _iaRxCount = 0;
   int _lastIaLogMs = 0;
   int _lastBleRetryMs = 0;
+  int _lastFrameMs = 0;
+
+  final ValueNotifier<DebugData> _debugNotifier = ValueNotifier(
+    DebugData(si: 0, tension: 0, drumEnv: 0, drive: 0),
+  );
 
   // Manual
   bool _modoManual = false;
@@ -53,6 +60,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String _detectedClass = '';
   String _detectedSection = '';
   String _lastInstrument = 'mixed';
+  double _lastCentroid = 0.0;
   bool _isEnergetic = false;
   List<int>? _lastSentBytes;
   int _beatBpm = 0;
@@ -65,6 +73,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _emotionR = 0;
   int _emotionG = 0;
   int _emotionB = 0;
+  int _overrideToHighEnergyUntilMs = 0;
 
   // Color lerp
   double _curR = 255, _curG = 40, _curB = 40;
@@ -79,15 +88,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   double _smoothE = 0, _smoothBass = 0;
   double _dynMin = 1.0, _dynMax = 0.0;
   double _brilloEnv = 0.0;
+  double _driveEma = 0.0; // Moving average de la línea roja (Luz)
+
+  // Inercia Visual (Director de Orquesta)
+  double _wBassEma = 0.5;
+  double _wVocalsEma = 0.5;
+  double _wDrumsEma = 0.5;
+  double _wEnergyEma = 0.5;
+  double _sectionBoostEma = 1.0;
+  double _drumEnvelope = 0.0;
 
   // Settings
   double _intensidadGlobal = 1.2;
   double _lerpSpeed = 0.18; // transiciones más visibles
   double _emaAlpha = 0.0; // DESACTIVAR EMA en Dart — Kotlin ya lo hace
   double _brAttack = 0.85; // subida casi instantánea
-  double _brRelease = 0.35; // bajada más rápida para contraste
+  double _brRelease = 0.18; // bajada más suave para dejar un rastro (afterglow)
   double _maxBri = 240.0;
-  double _gamma = 1.8; // Filosofía Log-Mel: Gama > 1.0 hace que los bajos sean oscuros y los picos explosivos
+  double _gamma = 2.4; // Filosofía Log-Mel: Gama > 1.0 hace que los bajos sean oscuros y los picos explosivos
   double _silenceThreshold = 0.015; // Umbral más permisivo para no cortar notas sostenidas suaves
   bool _settingsExpanded = false;
 
@@ -95,9 +113,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const double _defLerpSpeed = 0.18;
   static const double _defEmaAlpha = 0.0;
   static const double _defBrAttack = 0.85;
-  static const double _defBrRelease = 0.35;
+  static const double _defBrRelease = 0.18;
   static const double _defMaxBri = 240.0;
-  static const double _defGamma = 1.8;
+  static const double _defGamma = 2.4;
   static const double _defSilenceThreshold = 0.015;
 
   bool _shouldSendBytes(List<int> next) {
@@ -233,31 +251,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           return;
         }
 
-        if (result.energy < _silenceThreshold) {
-          if (!_isSilence) {
-            _isSilence = true;
-            _dynMin = 1.0;
-            _dynMax = 0.0;
-            _brilloEnv = 0.0;
-            _sendLedCommand(
-              const LedCommand(
-                tipo: 0x01,
-                r: 0,
-                g: 0,
-                b: 0,
-                brillo: 0,
-                patron: 0,
-              ),
-            );
-            setState(() {
-              _detectedClass = 'Silencio';
-              _detectedSection = '';
-            });
-          }
-          return;
-        }
-
-        if (_isSilence) _isSilence = false;
+        // Eliminamos el early-return de silencio. 
+        // Queremos que el DSP siga trabajando incluso si hay puro silencio (puros ceros),
+        // para que las variables decaigan suavemente a cero y no se quede pegado ningún LED.
 
         final e = result.energy.clamp(0.0, 1.0);
         final bass = result.bassEnergy.clamp(0.0, 1.0);
@@ -267,226 +263,234 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         if (_modoManual) return;
 
         if (result.isFastUpdate) {
-          // Filosofía Log-Mel: Percepción exponencial y separación de ruido
-          final e    = result.energy.clamp(0.0, 1.0);
+          final e = result.energy.clamp(0.0, 1.0);
           final bass = result.bassEnergy.clamp(0.0, 1.0);
-          final inst = _lastInstrument;
+          final vocal = result.vocalEnergy.clamp(0.0, 1.0);
+          double tension = result.tension.clamp(0.0, 1.0);
           
-          // --- DINÁMICA DE COLOR EN TIEMPO REAL (LOW POWER MODE) ---
-          // Para proteger tu fuente actual, usamos colores que solo encienden
-          // 1 o 2 canales a la vez (Rojo y un poco de Azul/Verde), evitando el Blanco.
-          double tR = 255.0, tG = 0.0, tB = 0.0;
+          // INYECCIÓN VOCAL: FFT pura sin IA.
+          // Reducimos el impacto de la voz al mínimo (0.05) por precaución de voltaje.
+          tension = (tension + (vocal * 0.05)).clamp(0.0, 1.0);
           
-          if (inst == 'bass') {
-            // Bajos: Rojo violáceo (Canal R fuerte, Canal B medio)
-            tR = 220.0;
-            tG = 0.0;
-            tB = (40 + 120 * bass).clamp(0, 255).toDouble();
-          } else if (inst == 'drums') {
-            // Batería: Naranja oscuro (Canal R fuerte, Canal G bajo)
-            tR = 255.0;
-            tG = (20 + 80 * e).clamp(0, 255).toDouble();
-            tB = 0.0;
-          } else if (inst == 'vocals') {
-            // Voces: Rojo puro pulsante
-            tR = (180 + 75 * e).clamp(0, 255).toDouble();
-            tG = 0.0;
-            tB = 0.0;
-          } else {
-            // Default: Rojo base con destellos cálidos
-            tR = 255.0;
-            tG = (10 + 40 * e).clamp(0, 255).toDouble();
-            tB = 10.0;
+          // HIBRIDACIÓN DE TENSIÓN: 
+          // Si el modelo dice que es el coro, mezclamos (50/50) la Tensión (Sorpresa) con el Promedio Rápido (Suma de Pesos).
+          // Esto soluciona la gráfica plana: ahora el Azul bailará agresivamente y rara vez se quedará pegado al 1.0, 
+          // protegiendo tu fuente de caídas de voltaje por culpa del Amarillo.
+          if (_isEnergetic) {
+            tension = ((tension + _driveEma) / 2.0).clamp(0.0, 1.0);
+          }
+          
+          final si = _smoothE.clamp(0.0, 1.0);
+          final sb = _smoothBass.clamp(0.0, 1.0);
+          final pulse = _musicPulse(nowMs);
+          final kickPulse = (result.kickHit || result.snareHit) ? 1.0 : 0.0;
+          
+          int dt = 0;
+          if (_lastFrameMs > 0) dt = nowMs - _lastFrameMs;
+          _lastFrameMs = nowMs;
+
+          // Anulación Híbrida (DSP + IA)
+          String activeLabel = _emotionLabel;
+          
+          if (tension > 0.60) {
+            _overrideToHighEnergyUntilMs = nowMs + 3000;
+          }
+          if (e > 0.42 && (result.kickHit || result.snareHit)) {
+            _overrideToHighEnergyUntilMs = nowMs + 2500;
+          }
+          if (nowMs < _overrideToHighEnergyUntilMs && activeLabel == 'acustico') {
+            activeLabel = 'energetico';
           }
 
-          // Aceleramos la transición de color (0.35)
-          _curR += (tR - _curR) * 0.35;
-          _curG += (tG - _curG) * 0.35;
-          _curB += (tB - _curB) * 0.35;
+          // --- 1. ROL DEL MODELO (El Director) ---
+          double tWBass = 0.0;
+          double tWVocals = 0.0;
+          double tWDrums = 0.0;
+          double tWEnergy = 0.0;
+          double tBoost = 1.0;
+          
+          if (_lastInstrument == 'bass') {
+            tWBass = 1.0; 
+            tWDrums = 0.30;
+            tWVocals = 0.10;
+            tWEnergy = 0.20;
+            tBoost = 1.15;
+          } else if (_lastInstrument == 'vocals') {
+            tWVocals = 1.0;
+            tWDrums = 0.30;  
+            tWBass = 0.20;
+            tWEnergy = 0.30;
+            tBoost = 1.25;
+          } else if (_lastInstrument == 'drums') {
+            tWDrums = 1.20; 
+            tWBass = 0.30;
+            tWVocals = 0.10;
+            tWEnergy = 0.20;
+            tBoost = 1.35;
+          } else {
+            tWBass = 0.50;
+            tWVocals = 0.50;
+            tWDrums = 0.60;
+            tWEnergy = 0.40;
+            tBoost = 1.0;
+          }
+          
+          if (_isEnergetic) {
+            tBoost *= 1.25; // Más brillo en el coro
+          }
 
+          // --- 4. COLOR DINÁMICO POR CENTROIDE ESPECTRAL (PALETA FUEGO) ---
+          
+          double rawActivator = tension.clamp(0.0, 1.0);
+          double glow = math.pow(rawActivator, 2.0).toDouble();
+          
+          // Mapeamos el centroide de 0Hz a 4000Hz a una escala de 0.0 a 1.0
+          double normCentroid = (result.spectralCentroid / 4000.0).clamp(0.0, 1.0);
+          
+          // Interpolación suave del Centroide
+          _lastCentroid = (_lastCentroid * 0.85) + (normCentroid * 0.15);
+          
+          // El Rojo siempre es la base inamovible
+          _targetR = 255.0;
+          
+          // Mientras más alto el centroide (agudos), más verde inyectamos para calentar a Amarillo/Ámbar
+          _targetG = _lastCentroid * 200.0; 
+          _targetB = 0.0;
+          
+          // Destello de Clímax (Blanco)
+          if (glow > 0.5) {
+             double extra = (glow - 0.5) * 2.0; 
+             _targetG += (extra * 55.0);  
+             _targetB += (extra * 255.0); 
+          }
+          
+          _targetR = _targetR.clamp(0.0, 255.0);
+          _targetG = _targetG.clamp(0.0, 255.0);
+          _targetB = _targetB.clamp(0.0, 255.0);
+
+          // Transición de color EXTREMADAMENTE suave (amigable)
+          const double slowColorLerp = 0.015; // ~1.5 segundos para cambiar de color
+          _curR += (_targetR - _curR) * slowColorLerp;
+          _curG += (_targetG - _curG) * slowColorLerp;
+          _curB += (_targetB - _curB) * slowColorLerp;
           final r = _curR.round().clamp(0, 255);
           final g = _curG.round().clamp(0, 255);
           final b = _curB.round().clamp(0, 255);
 
-          double wE, wB, atk, rel;
-          switch (inst) {
-            case 'drums': wE=0.50; wB=0.50; atk=1.0; rel=0.15; break;
-            case 'bass':  wE=0.30; wB=0.70; atk=0.8; rel=0.30; break;
-            case 'vocals':wE=0.80; wB=0.10; atk=0.6; rel=0.50; break;
-            default:      wE=0.55; wB=0.45; atk=0.8; rel=0.25; break;
+          // --- 3. FILTRO DE INERCIA VISUAL (Slew Rate Limiter / EMA) ---
+          const double emaSlew = 0.08; 
+          _wBassEma = (tWBass * emaSlew) + (_wBassEma * (1.0 - emaSlew));
+          _wVocalsEma = (tWVocals * emaSlew) + (_wVocalsEma * (1.0 - emaSlew));
+          _wDrumsEma = (tWDrums * emaSlew) + (_wDrumsEma * (1.0 - emaSlew));
+          _wEnergyEma = (tWEnergy * emaSlew) + (_wEnergyEma * (1.0 - emaSlew));
+          _sectionBoostEma = (tBoost * emaSlew) + (_sectionBoostEma * (1.0 - emaSlew));
+
+          // --- 2. GENERACIÓN DE PESOS DINÁMICOS ---
+          double dynBass = math.max(0.0, sb - 0.15);
+          double dynVocal = math.max(0.0, vocal - 0.15);
+          double dynEnergy = math.max(0.0, si - 0.20);
+          
+          // Interpolación Percusiva (Envolvente suave en lugar de parpadeo binario)
+          if (result.kickHit || result.snareHit) {
+            _drumEnvelope = 1.0;
+          } else {
+            _drumEnvelope *= 0.82; // Caída exponencial muy musical (~100ms)
           }
+          
+          double rawDrive = 
+              (dynBass * _wBassEma) + 
+              (dynVocal * _wVocalsEma) + 
+              (_drumEnvelope * _wDrumsEma) + 
+              (dynEnergy * _wEnergyEma);
 
-          final raw = (e * wE + bass * wB).clamp(0.0, 1.0);
-          final dyn = _normalizeDynamic(raw);
+          // Quitamos la supresión (divisor) para que recupere toda su fuerza
+          double drive = rawDrive.clamp(0.0, 1.0);
+          final motion = (drive * pulse).clamp(0.0, 1.0);
           
-          // Expansión cuadrática para hundir el piso (Log-Mel perceptual)
-          final expandedDyn = math.pow(dyn, 2.0).toDouble();
+          // Actualizamos la Memoria de Luz (Línea Roja) para el siguiente frame.
+          // Usamos un factor de 0.35 para que reaccione rapidísimo y varíe mucho, evitando que sea una línea plana.
+          _driveEma = _driveEma + 0.35 * (drive - _driveEma);
           
-          // Gate estricto basado en silencio real
-          final gate = e < _silenceThreshold 
-              ? 0.0 
-              : ((e - _silenceThreshold) / 0.15).clamp(0.0, 1.0);
-              
-          // Diferencia DRAMÁTICA entre Coro y Verso
-          // Si estamos en el coro (_isEnergetic), la intensidad pasa al 100%. 
-          // Si estamos en un verso, reducimos la agresividad de la señal a un 75%.
-          final double sectionMultiplier = _isEnergetic ? 1.0 : 0.75;
+          _debugNotifier.value = DebugData(
+            si: si, 
+            tension: tension, 
+            drumEnv: _drumEnvelope, 
+            drive: rawDrive, // Enviamos el valor crudo para ver si satura (clipping)
+            dt: dt,
+          );
           
-          // El dyn expandido lleva la mayoría del peso para hacer explosivos los picos
-          final intensity = ((raw * 0.15 + expandedDyn * 0.85) * gate * sectionMultiplier).clamp(0.0, 1.0);
+          final curve = math.pow(motion, _gamma).toDouble();
+          
+          // WS2815 12V UNLEASHED: Ya no limitamos la energía al 25% para evitar caídas de voltaje.
+          // Le damos el 100% de fuerza bruta.
+          final maxBriFactor = 1.0; 
+          final maxBri = (_maxBri * maxBriFactor).round();
 
-          // Aquí está el truco visual: El PWM máximo en los versos se capa a la mitad.
-          // Así, cuando entra el coro y salta de 50% a 100%, el salto es masivo.
-          final maxBri = _isEnergetic ? _maxBri.round() : (_maxBri * 0.50).round();
-          
-          // Forzar que el gamma no aplane (Gamma < 1 empantana todo en luz media)
-          final gam = _gamma < 1.0 ? 1.8 : _gamma;
+          int brillo = (maxBri * curve * _sectionBoostEma).round();
 
-          int brillo = (maxBri * math.pow(intensity, gam)).round();
+          // Capa 3: Ya no inyectamos base plana, dejamos que la gráfica baje a 0 para más dinámica
           brillo = (brillo * _intensidadGlobal).clamp(0, 255).round();
 
-          // Bypass absoluto para golpes percusivos
-          final bool hit = result.kickHit || result.snareHit;
-          if (result.kickHit) {
-            brillo = math.max(brillo, maxBri);
-          } else if (result.snareHit) {
-            brillo = math.max(brillo, (maxBri * 0.85).round());
-          }
+          // Gate Anti-Ruido: Si hay pausa, pero hay ruido ambiental (motor), forzamos a apagar
+          final gate = e < 0.02 ? 0.0 : ((e - 0.02) / 0.1).clamp(0.0, 1.0);
+          brillo = (brillo * gate).round(); 
 
-          if (hit) {
-            _brilloEnv = brillo.toDouble();
+          // Envelope DINÁMICO (Se adapta a la canción!)
+          double attack = 0.65;
+          double release = 0.15;
+          
+          if (_isEnergetic) {
+             // ROCK/EDM: Súper agresivo, cero lag, casi estroboscópico
+             attack = 0.85;
+             release = 0.40;
+          } else if (_detectedClass == 'groove') {
+             // TRAP/REGGAE/POP: Intermedio, buen rebote
+             attack = 0.70;
+             release = 0.18;
           } else {
-            final brRate = brillo > _brilloEnv ? _brAttack * atk : _brRelease * rel;
-            _brilloEnv += (brillo - _brilloEnv) * brRate;
+             // ACÚSTICO/CHILL: Suave, cinemático, cambios lentos y respirables
+             attack = 0.45;
+             release = 0.08;
           }
-          
-          // Drop al vacío en silencios, pero un poco más suave para no cortarlo bruscamente
-          if (gate == 0.0) _brilloEnv *= 0.75;
-          
-          brillo = _brilloEnv.round().clamp(0, 255);
 
-          // Eliminados los fogonazos blancos para proteger la fuente.
+          final brs = brillo >= _brilloEnv ? attack : release;
+          _brilloEnv = _brilloEnv + (brillo - _brilloEnv) * brs;
+          
+          if (gate == 0.0) _brilloEnv *= 0.60; // Si es puro silencio, mátalo rápido
+
+          var br = _brilloEnv.round().clamp(0, 255);
+          if (br < 5) br = 0;
+
+          // Forzar blanco cálido si todo satura
           int oR = r, oG = g, oB = b;
+          if (r >= 250 && g >= 250 && b >= 250) {
+            oR = 255; oG = 190; oB = 120;
+          }
 
           _ble.sendCommand(LedCommand(
-            tipo:0x01, r:oR, g:oG, b:oB,
-            brillo:brillo, patron:_cachedPatron,
+            tipo: 0x01, 
+            r: oR, 
+            g: oG, 
+            b: oB,
+            brillo: br, 
+            patron: _cachedPatron,
           ).toBytes());
           return;
         }
 
-        // SLOW PATH
-        final section = result.section;
-        final sConf = result.sectionConfidence;
-        final inst = result.instrument.isNotEmpty
-            ? result.instrument
-            : _lastInstrument;
+        // SLOW PATH (Ejecución ML 1Hz)
         if (result.instrument.isNotEmpty) _lastInstrument = result.instrument;
-
-        _isEnergetic = section == 'chorus';
-        final emotionBlend = (_emotionLabel.isNotEmpty && _emotionConf > 0.55)
-            ? (0.25 + 0.35 * ((_emotionConf - 0.55) / 0.45).clamp(0.0, 1.0))
-            : 0.0;
-        if (inst == 'bass') {
-          _targetR = (30 + 70 * (1 - _smoothBass)).clamp(0, 255).toDouble();
-          _targetG = (70 + 55 * _smoothBass).clamp(0, 255).toDouble();
-          _targetB = (170 + 70 * _smoothBass).clamp(0, 255).toDouble();
-        } else if (inst == 'drums') {
-          _targetR = (170 + 65 * _smoothBass).clamp(0, 255).toDouble();
-          _targetG = (55 + 35 * _smoothE).clamp(0, 255).toDouble();
-          _targetB = (35 + 20 * _smoothE).clamp(0, 255).toDouble();
-        } else if (inst == 'vocals' && _isEnergetic) {
-          final vocalLift = (_emotionConf > 0.0 ? _emotionConf : 0.0).clamp(
-            0.0,
-            1.0,
-          );
-          _targetR = (220 + 25 * vocalLift).clamp(0, 255).toDouble();
-          _targetG = (120 + 80 * vocalLift).clamp(0, 255).toDouble();
-          _targetB = (140 + 55 * (1 - vocalLift)).clamp(0, 255).toDouble();
-        } else {
-          _targetR =
-              (_fallbackR * (1 - emotionBlend) + _emotionR * emotionBlend)
-                  .clamp(0, 255)
-                  .toDouble();
-          _targetG =
-              (_fallbackG * (1 - emotionBlend) + _emotionG * emotionBlend)
-                  .clamp(0, 255)
-                  .toDouble();
-          _targetB =
-              (_fallbackB * (1 - emotionBlend) + _emotionB * emotionBlend)
-                  .clamp(0, 255)
-                  .toDouble();
+        
+        // Mapeamos las salidas reales del modelo ('energetico', 'groove', 'acustico')
+        if (result.emotionLabel.isNotEmpty) {
+          _isEnergetic = result.emotionLabel == 'energetico';
         }
-        _cachedPatron = (_isEnergetic && sConf > 0.6) ? 1 : 0;
 
-        final cR = _curR.round().clamp(0, 255);
-        final cG = _curG.round().clamp(0, 255);
-        final cB = _curB.round().clamp(0, 255);
-        final si = _smoothE.clamp(0.0, 1.0);
-        final sb = _smoothBass.clamp(0.0, 1.0);
-        final gateSlow = ((_smoothE - 0.03) / 0.16).clamp(0.0, 1.0);
-        final pulse = _musicPulse(nowMs);
-        final kickPulse = (result.kickHit || result.snareHit) ? 1.0 : 0.0;
-        double drive;
-        double curvePow;
-        double sectionBoost;
-        if (inst == 'bass') {
-          drive = (sb * 0.88 + si * 0.12 + gateSlow * 0.18).clamp(0.0, 1.0);
-          curvePow = 0.56;
-          sectionBoost = 1.18;
-        } else if (inst == 'vocals' && _isEnergetic) {
-          drive = (si * 0.70 + gateSlow * 0.16 + _emotionConf * 0.14).clamp(
-            0.0,
-            1.0,
-          );
-          curvePow = 0.60;
-          sectionBoost = 1.32;
-        } else if (inst == 'drums') {
-          drive = (si * 0.36 + gateSlow * 0.22 + kickPulse * 0.42).clamp(
-            0.0,
-            1.0,
-          );
-          curvePow = 0.58;
-          sectionBoost = 1.15;
-        } else {
-          drive = (si * 0.54 + sb * 0.24 + gateSlow * 0.22).clamp(0.0, 1.0);
-          curvePow = _isEnergetic ? 0.64 : 0.78;
-          sectionBoost = _isEnergetic ? 1.16 : 0.96;
-        }
-        final motion = (drive * pulse).clamp(0.0, 1.0);
-        final curve = math.pow(motion, curvePow).toDouble();
-        final stb = (255.0 * curve * sectionBoost).round().clamp(0, 255);
-        final brs = stb >= _brilloEnv
-            ? (_brAttack * 1.12)
-            : (_brRelease * 0.92);
-        _brilloEnv = _brilloEnv + (stb - _brilloEnv) * brs;
-        var br = _brilloEnv.round().clamp(0, 255);
-        br = (br * _intensidadGlobal).clamp(0, 255).round();
-        // Evitar pequeños valores residuales que mantienen el led encendido
-        if (br < 8) br = 0;
-
-        int oR = cR, oG = cG, oB = cB;
-        if (cR >= 250 && cG >= 250 && cB >= 250) {
-          oR = 255;
-          oG = 190;
-          oB = 120;
-        }
-        _sendLedCommand(
-          LedCommand(
-            tipo: 0x01,
-            r: oR,
-            g: oG,
-            b: oB,
-            brillo: br,
-            patron: _cachedPatron,
-          ),
-        );
-
+        _cachedPatron = (_isEnergetic && result.emotionConfidence > 0.6) ? 1 : 0;
+        
         setState(() {
-          if (_emotionLabel.isNotEmpty) _detectedClass = _emotionLabel;
-          _detectedSection = _isEnergetic
-              ? 'CHORUS ${(sConf * 100).toInt()}%'
-              : 'verse';
+          if (result.emotionLabel.isNotEmpty) _detectedClass = result.emotionLabel;
+          _detectedSection = _isEnergetic ? 'CORO/ENERGÉTICO' : 'VERSO/TRANQUILO';
         });
       },
     );
@@ -634,6 +638,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ],
           ),
           if (_iaActive) ...[
+            const SizedBox(height: 12),
+            DebugVisualizer(notifier: _debugNotifier),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
