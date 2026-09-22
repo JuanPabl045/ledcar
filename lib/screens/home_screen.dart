@@ -339,29 +339,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             tBoost *= 1.25; // Más brillo en el coro
           }
 
-          // --- 4. COLOR DINÁMICO POR CENTROIDE ESPECTRAL (PALETA FUEGO) ---
+          // --- 4. COLOR DINÁMICO POR POTENCIA (ROJO / ÁMBAR / AMARILLO) ---
           
-          double rawActivator = tension.clamp(0.0, 1.0);
-          double glow = math.pow(rawActivator, 2.0).toDouble();
+          // Usamos la energía sostenida (si) o la tensión para el color
+          double potencia = math.max(si, tension).clamp(0.0, 1.0);
           
-          // Mapeamos el centroide de 0Hz a 4000Hz a una escala de 0.0 a 1.0
-          double normCentroid = (result.spectralCentroid / 4000.0).clamp(0.0, 1.0);
+          // El usuario solicitó EXPRESAMENTE: Rojo, Ámbar y Amarillo.
+          // Eliminamos el Verde por completo.
+          // Potencia Baja -> Amarillo (R=255, G=255)
+          // Potencia Media -> Ámbar (R=255, G=120)
+          // Potencia Alta -> Rojo (R=255, G=0)
           
-          // Interpolación suave del Centroide
-          _lastCentroid = (_lastCentroid * 0.85) + (normCentroid * 0.15);
-          
-          // El Rojo siempre es la base inamovible
           _targetR = 255.0;
-          
-          // Mientras más alto el centroide (agudos), más verde inyectamos para calentar a Amarillo/Ámbar
-          _targetG = _lastCentroid * 200.0; 
           _targetB = 0.0;
           
-          // Destello de Clímax (Blanco)
-          if (glow > 0.5) {
-             double extra = (glow - 0.5) * 2.0; 
-             _targetG += (extra * 55.0);  
-             _targetB += (extra * 255.0); 
+          if (potencia < 0.5) {
+             // Amarillo a Ámbar
+             double t = potencia / 0.5;
+             _targetG = 255.0 - (t * 135.0); // 255 -> 120
+          } else {
+             // Ámbar a Rojo
+             double t = (potencia - 0.5) / 0.5;
+             _targetG = 120.0 - (t * 120.0); // 120 -> 0
           }
           
           _targetR = _targetR.clamp(0.0, 255.0);
