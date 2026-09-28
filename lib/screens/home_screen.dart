@@ -584,7 +584,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Widget _buildHeader() {
     return const Text(
-      'LedCar',
+      'Hola 12',
       style: TextStyle(
         fontSize: 28,
         fontWeight: FontWeight.bold,
