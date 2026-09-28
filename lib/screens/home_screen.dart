@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import '../services/ble_manager.dart';
 import '../services/audio_capture_service.dart';
 import '../widgets/debug_visualizer.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class LedCommand {
   final int tipo, r, g, b, brillo, patron, offsetMs;
@@ -60,7 +61,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   String _detectedClass = '';
   String _detectedSection = '';
   String _lastInstrument = 'mixed';
-  double _lastCentroid = 0.0;
   bool _isEnergetic = false;
   List<int>? _lastSentBytes;
   int _beatBpm = 0;
@@ -101,7 +101,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // Settings
   double _intensidadGlobal = 1.2;
   double _lerpSpeed = 0.18; // transiciones más visibles
-  double _emaAlpha = 0.0; // DESACTIVAR EMA en Dart — Kotlin ya lo hace
+  double _emaAlpha = 0.65;
   double _brAttack = 0.85; // subida casi instantánea
   double _brRelease = 0.18; // bajada más suave para dejar un rastro (afterglow)
   double _maxBri = 240.0;
@@ -111,7 +111,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   static const double _defIntensidadGlobal = 1.2;
   static const double _defLerpSpeed = 0.18;
-  static const double _defEmaAlpha = 0.0;
+  static const double _defEmaAlpha = 0.65;
   static const double _defBrAttack = 0.85;
   static const double _defBrRelease = 0.18;
   static const double _defMaxBri = 240.0;
@@ -135,16 +135,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _ble.sendCommand(bytes);
   }
 
-  void _restoreDefaults() => setState(() {
-    _lerpSpeed = _defLerpSpeed;
-    _emaAlpha = _defEmaAlpha;
-    _brAttack = _defBrAttack;
-    _brRelease = _defBrRelease;
-    _maxBri = _defMaxBri;
-    _gamma = _defGamma;
-    _silenceThreshold = _defSilenceThreshold;
-    _intensidadGlobal = _defIntensidadGlobal;
-  });
+  void _restoreDefaults() {
+    setState(() {
+      _lerpSpeed = _defLerpSpeed;
+      _emaAlpha = _defEmaAlpha;
+      _brAttack = _defBrAttack;
+      _brRelease = _defBrRelease;
+      _maxBri = _defMaxBri;
+      _gamma = _defGamma;
+      _silenceThreshold = _defSilenceThreshold;
+      _intensidadGlobal = _defIntensidadGlobal;
+    });
+    _saveSettings();
+  }
 
   double _normalizeDynamic(double raw) {
     final x = raw.clamp(0.0, 1.0);
@@ -186,8 +189,36 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return 0.74 + (0.52 * pulse);
   }
 
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _intensidadGlobal = prefs.getDouble('intensidadGlobal') ?? _defIntensidadGlobal;
+      _lerpSpeed = prefs.getDouble('lerpSpeed') ?? _defLerpSpeed;
+      _emaAlpha = prefs.getDouble('emaAlpha') ?? _defEmaAlpha;
+      _brAttack = prefs.getDouble('brAttack') ?? _defBrAttack;
+      _brRelease = prefs.getDouble('brRelease') ?? _defBrRelease;
+      _maxBri = prefs.getDouble('maxBri') ?? _defMaxBri;
+      _gamma = prefs.getDouble('gamma') ?? _defGamma;
+      _silenceThreshold = prefs.getDouble('silenceThreshold') ?? _defSilenceThreshold;
+    });
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('intensidadGlobal', _intensidadGlobal);
+    await prefs.setDouble('lerpSpeed', _lerpSpeed);
+    await prefs.setDouble('emaAlpha', _emaAlpha);
+    await prefs.setDouble('brAttack', _brAttack);
+    await prefs.setDouble('brRelease', _brRelease);
+    await prefs.setDouble('maxBri', _maxBri);
+    await prefs.setDouble('gamma', _gamma);
+    await prefs.setDouble('silenceThreshold', _silenceThreshold);
+  }
+
   @override
   void initState() {
+    _loadSettings();
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _ble.connectionStream.listen((c) {
@@ -246,6 +277,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         if (!_bleConnected) {
           if ((nowMs - _lastBleRetryMs) > 5000 && !_bleScanning) {
             _lastBleRetryMs = nowMs;
+            if (!mounted) return;
             _connectBle();
           }
           return;
@@ -263,8 +295,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         if (_modoManual) return;
 
         if (result.isFastUpdate) {
-          final e = result.energy.clamp(0.0, 1.0);
-          final bass = result.bassEnergy.clamp(0.0, 1.0);
           final vocal = result.vocalEnergy.clamp(0.0, 1.0);
           double tension = result.tension.clamp(0.0, 1.0);
           
@@ -367,7 +397,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _targetB = _targetB.clamp(0.0, 255.0);
 
           // Transición de color EXTREMADAMENTE suave (amigable)
-          const double slowColorLerp = 0.015; // ~1.5 segundos para cambiar de color
+          const double slowColorLerp = 0.06; // ~1.5 segundos para cambiar de color
           _curR += (_targetR - _curR) * slowColorLerp;
           _curG += (_targetG - _curG) * slowColorLerp;
           _curB += (_targetB - _curB) * slowColorLerp;
@@ -519,6 +549,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _ble.dispose();
     _audioCapture?.dispose();
+    _debugNotifier.dispose();
     super.dispose();
   }
 
@@ -825,8 +856,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   _slider(
                     'Contraste',
                     _gamma,
-                    0.4,
-                    2.0,
+                    0.3,
+                    3.0,
                     (v) => _gamma = v,
                     desc: 'Bajo=luz suave, Alto=solo picos',
                   ),
@@ -996,7 +1027,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               value: value.clamp(min, max),
               min: min,
               max: max,
-              onChanged: (v) => setState(() => onChanged(v)),
+              onChanged: (v) {
+                setState(() => onChanged(v));
+                _saveSettings();
+              },
             ),
           ),
           if (desc.isNotEmpty)
