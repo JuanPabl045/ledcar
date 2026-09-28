@@ -371,25 +371,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
           // --- 4. COLOR DINÁMICO POR POTENCIA (ROJO / ÁMBAR / AMARILLO) ---
           
-          // Usamos la energía sostenida (si) o la tensión para el color
-          double potencia = math.max(si, tension).clamp(0.0, 1.0);
-          
-          // El usuario solicitó EXPRESAMENTE: Rojo, Ámbar y Amarillo.
-          // Potencia Baja -> Rojo (R=255, G=0)
-          // Potencia Media -> Ámbar (R=255, G=120)
-          // Potencia Alta -> Amarillo (R=255, G=255)
+          // Usamos rawDrive (que reacciona instantáneamente a los golpes) en lugar del promedio.
+          // Esto hace que el color parpadee violentamente de rojo a amarillo en los beats.
+          double potencia = ((result.bassEnergy * 0.6) + (_drumEnvelope * 0.4)).clamp(0.0, 1.0);
           
           _targetR = 255.0;
           _targetB = 0.0;
           
-          if (potencia < 0.5) {
-             // Rojo a Ámbar
-             double t = potencia / 0.5;
-             _targetG = t * 120.0; // 0 -> 120
+          if (potencia < 0.4) {
+             // Rojo Profundo a Ámbar Oscuro
+             double t = potencia / 0.4;
+             _targetG = t * 40.0; // 0 -> 40 (Evita el verde)
           } else {
-             // Ámbar a Amarillo
-             double t = (potencia - 0.5) / 0.5;
-             _targetG = 120.0 + (t * 135.0); // 120 -> 255
+             // Ámbar a Amarillo Oro (Sin llegar al verde limón de las tiras LED)
+             double t = (potencia - 0.4) / 0.6;
+             _targetG = 40.0 + (t * 100.0); // 40 -> 140 (G=140 suele ser amarillo perfecto en WS2812/2815)
           }
           
           _targetR = _targetR.clamp(0.0, 255.0);
@@ -414,22 +410,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _sectionBoostEma = (tBoost * emaSlew) + (_sectionBoostEma * (1.0 - emaSlew));
 
           // --- 2. GENERACIÓN DE PESOS DINÁMICOS ---
-          double dynBass = math.max(0.0, sb - 0.15);
-          double dynVocal = math.max(0.0, vocal - 0.15);
-          double dynEnergy = math.max(0.0, si - 0.20);
+          // Restamos el promedio (sb/si) a la energía instantánea. 
+          // Así, los ruidos constantes dan 0 (oscuridad) y SOLO LOS PICOS encienden la luz.
+          double instantBass = result.bassEnergy.clamp(0.0, 1.0);
+          double instantE = result.energy.clamp(0.0, 1.0);
+          
+          double dynBass = math.max(0.0, instantBass - (sb * 0.75));
+          double dynVocal = math.max(0.0, vocal - 0.25);
+          double dynEnergy = math.max(0.0, instantE - (si * 0.80));
           
           // Interpolación Percusiva (Envolvente suave en lugar de parpadeo binario)
           if (result.kickHit || result.snareHit) {
             _drumEnvelope = 1.0;
           } else {
-            _drumEnvelope *= 0.82; // Caída exponencial muy musical (~100ms)
+            _drumEnvelope *= 0.70; // Caída más rápida para que parpadee más agresivo y no se quede iluminado
           }
           
           double rawDrive = 
-              (dynBass * _wBassEma) + 
-              (dynVocal * _wVocalsEma) + 
-              (_drumEnvelope * _wDrumsEma) + 
-              (dynEnergy * _wEnergyEma);
+              (dynBass * _wBassEma * 1.5) + 
+              (dynVocal * _wVocalsEma * 0.8) + 
+              (_drumEnvelope * _wDrumsEma * 1.5) + 
+              (dynEnergy * _wEnergyEma * 1.2);
 
           // Quitamos la supresión (divisor) para que recupere toda su fuerza
           double drive = rawDrive.clamp(0.0, 1.0);
